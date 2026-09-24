@@ -41,7 +41,10 @@ class Resume(Base):
     certifications = JsonColumn()
     achievements = JsonColumn()
     formatting = JsonColumn()
-    overall_score = Column(Integer, default=0)
+    overall_score = Column(Float, default=0)  # V2 engine returns a normalized float (e.g. 84.7), not an int
+    scoring_version = Column(String, nullable=True)
+    score_timestamp = Column(DateTime(timezone=True), nullable=True)
+    scoring_config_version = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 class ResumeBucket(Base):
@@ -49,9 +52,10 @@ class ResumeBucket(Base):
     id = Column(String, primary_key=True)
     resume_id = Column(String, ForeignKey("resumes.id"))
     bucket_name = Column(String)
-    score = Column(Integer)
-    max_score = Column(Integer)
+    score = Column(Float)
+    max_score = Column(Float)
     weight = Column(Float)
+    weighted_score = Column(Float, nullable=True)
 
 class ResumeMistake(Base):
     __tablename__ = "resume_mistakes"
@@ -61,3 +65,9 @@ class ResumeMistake(Base):
     mistake = Column(String)
     feedback = Column(Text)
     section = Column(String, nullable=True)
+    severity = Column(String, nullable=True)
+    criterion = Column(String, nullable=True)
+    finding_type = Column(String, nullable=True)
+    value = Column(String, nullable=True)
+    expected = Column(String, nullable=True)
+    impact = Column(Integer, nullable=True)

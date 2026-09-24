@@ -129,13 +129,23 @@ if fetch_btn:
                 st.markdown("#### Detailed Bucket Scores")
                 display_buckets = []
                 for bucket in buckets:
+                    weighted = bucket.get("weighted_score")
                     display_buckets.append({
                         "Category": bucket.get("name", "N/A"),
-                        "Score": f"{bucket.get('score', 0)}/100",
-                        "Weight": f"{bucket.get('weight', 0)*100:.0f}%"
+                        "Score": f"{bucket.get('score', 0):.0f}/100",
+                        "Weight": f"{bucket.get('weight', 0)*100:.0f}%",
+                        "Weighted Contribution": f"{weighted:.1f}" if weighted is not None else "N/A",
                     })
-                
+
                 st.dataframe(pd.DataFrame(display_buckets), use_container_width=True, hide_index=True)
+
+                scoring_version = data.get("scoring_version")
+                weight_total = data.get("weight_total")
+                if scoring_version:
+                    st.caption(
+                        f"Scoring engine v{scoring_version} · weights normalized from "
+                        f"{weight_total*100:.0f}% total" if weight_total else f"Scoring engine v{scoring_version}"
+                    )
             
             st.divider()
             
@@ -247,9 +257,15 @@ if fetch_btn:
                 
                 # Detailed mistakes table
                 st.markdown("#### All Issues Found")
+                severity_icons = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "⚪"}
                 for mistake in mistakes:
-                    with st.expander(f"🔴 {mistake.get('category', 'General')}: {mistake.get('mistake', 'Issue')}"):
+                    icon = severity_icons.get(mistake.get("severity"), "🔴")
+                    with st.expander(f"{icon} {mistake.get('category', 'General')}: {mistake.get('mistake', 'Issue')}"):
                         st.markdown(f"**Feedback:** {mistake.get('feedback', 'No feedback available.')}")
+                        if mistake.get("value") or mistake.get("expected"):
+                            st.caption(
+                                f"Measured: {mistake.get('value', 'N/A')} · Expected: {mistake.get('expected', 'N/A')}"
+                            )
                         if mistake.get('section'):
                             st.caption(f"Section: {mistake.get('section')}")
             else:

@@ -13,3 +13,4 @@ xlsxwriter
 streamlit
 python-dateutil
 plotly
+pytest

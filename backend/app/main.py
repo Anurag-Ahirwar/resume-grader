@@ -15,21 +15,15 @@ import re
 import pandas as pd
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from datetime import datetime, timezone
+
 from parser_engine.parser import parse_pdf_to_text
 from parser_engine.extractor import extract_all
-from parser_engine.scoring_engine import (
-    score_formatting_and_styling,
-    score_contact_info,
-    score_education,
-    score_technical_skills,
-    score_soft_skills,
-    score_projects,
-    score_work_experience,
-)
+from parser_engine.scoring import score_resume
 
 from backend.app.db import SessionLocal
 from backend.app import models
-from backend.app.db import engine
+from backend.app.db import engine, ensure_columns
 from backend.app.models import Base
 
 from parser_engine.report_engine import generate_resume_report
@@ -42,6 +36,9 @@ app = FastAPI(title="Resume Grader API")
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+Base.metadata.create_all(bind=engine)
+ensure_columns()
 
 
 class UploadResponse(BaseModel):
@@ -295,23 +292,11 @@ async def process_resume(upload_id: str = FastAPIPath(...)):
     # Attach diagnostics for scoring / debugging
     extracted["_diagnostics"] = diagnostics
 
-    # All bucket scores go here
-    bucket_results = []
-
-    # Run each bucket scoring
-    bucket_results.append(("Formatting & Styling", *score_formatting_and_styling(raw_text, extracted), 0.20))
-    bucket_results.append(("Contact Information", *score_contact_info(extracted), 0.10))
-    bucket_results.append(("Education", *score_education(extracted), 0.10))
-    bucket_results.append(("Technical Skills", *score_technical_skills(extracted), 0.15))
-    bucket_results.append(("Soft Skills", *score_soft_skills(raw_text), 0.05))
-    bucket_results.append(("Projects", *score_projects(extracted), 0.15))
-    bucket_results.append(("Work Experience", *score_work_experience(extracted), 0.10))
-    
-    # Compute overall weighted score
-    overall = 0
-    for (bucket_name, score_val, mistakes, weight) in bucket_results:
-        overall += score_val * weight
-    overall = int(overall)
+    # Run the V2 scoring engine: 7 bucket scorers + normalized overall score.
+    # overall = Σ(bucket_score × weight) / Σ(weight), so a perfect resume reaches 100
+    # regardless of the configured weights' total (see parser_engine/scoring/config.py).
+    result = score_resume(raw_text, extracted)
+    overall = result.overall_score
 
     # Save to DB
     db = SessionLocal()
@@ -342,7 +327,10 @@ async def process_resume(upload_id: str = FastAPIPath(...)):
                 certifications=json.dumps([]),
                 achievements=json.dumps([]),
                 formatting=json.dumps({}),
-                overall_score=overall
+                overall_score=overall,
+                scoring_version=result.scoring_version,
+                score_timestamp=datetime.now(timezone.utc),
+                scoring_config_version=result.scoring_version,
             )
             db.add(resume_row)
         else:
@@ -352,31 +340,40 @@ async def process_resume(upload_id: str = FastAPIPath(...)):
             resume_row.experience = json.dumps(extracted.get("experience_blocks", []))
             resume_row.projects = json.dumps(extracted.get("projects", []))
             resume_row.overall_score = overall
-        
+            resume_row.scoring_version = result.scoring_version
+            resume_row.score_timestamp = datetime.now(timezone.utc)
+            resume_row.scoring_config_version = result.scoring_version
+
             db.query(models.ResumeBucket).filter_by(resume_id=upload_id).delete()
             db.query(models.ResumeMistake).filter_by(resume_id=upload_id).delete()
-        # Save bucket scores + mistakes
-        for (bucket_name, score_val, mistakes, weight) in bucket_results:
+        # Save bucket scores + findings (structured evidence/feedback)
+        for bucket in result.buckets:
             bucket_id = str(uuid.uuid4())
             bucket_row = models.ResumeBucket(
                 id=bucket_id,
                 resume_id=upload_id,
-                bucket_name=bucket_name,
-                score=score_val,
-                max_score=100,
-                weight=weight
+                bucket_name=bucket.name,
+                score=bucket.raw_score,
+                max_score=bucket.max_score,
+                weight=bucket.weight,
+                weighted_score=bucket.weighted_score,
             )
             db.add(bucket_row)
 
-            for m in mistakes:
-                mid = str(uuid.uuid4())
+            for finding in bucket.findings:
                 mrow = models.ResumeMistake(
-                    id=mid,
+                    id=str(uuid.uuid4()),
                     resume_id=upload_id,
-                    category=m.get("category"),
-                    mistake=m.get("mistake"),
-                    feedback=m.get("feedback"),
-                    section=m.get("section")
+                    category=finding.category,
+                    mistake=finding.message,
+                    feedback=finding.feedback,
+                    section=finding.section,
+                    severity=finding.severity.value if finding.severity else None,
+                    criterion=finding.criterion,
+                    finding_type=finding.type,
+                    value=finding.value,
+                    expected=finding.expected,
+                    impact=finding.impact,
                 )
                 db.add(mrow)
 
@@ -394,9 +391,16 @@ async def process_resume(upload_id: str = FastAPIPath(...)):
     return {
         "resume_id": upload_id,
         "overall_score": overall,
+        "scoring_version": result.scoring_version,
+        "weight_total": result.weight_total,
         "buckets": [
-            {"name": bname, "score": score, "weight": weight}
-            for (bname, score, mistakes, weight) in bucket_results
+            {
+                "name": bucket.name,
+                "score": bucket.raw_score,
+                "weight": bucket.weight,
+                "weighted_score": bucket.weighted_score,
+            }
+            for bucket in result.buckets
         ]
     }
 
@@ -437,9 +441,11 @@ def get_resume_report(
                 "score": b.score,
                 "weight": b.weight,
                 "max_score": b.max_score,
+                "weighted_score": b.weighted_score,
             }
             for b in bucket_rows
         ]
+        weight_total = sum(b.weight for b in bucket_rows) if bucket_rows else None
 
         # ----------------------------
         # Fetch mistakes
@@ -456,6 +462,12 @@ def get_resume_report(
                 "mistake": m.mistake,
                 "feedback": m.feedback,
                 "section": m.section,
+                "severity": m.severity,
+                "criterion": m.criterion,
+                "type": m.finding_type,
+                "value": m.value,
+                "expected": m.expected,
+                "impact": m.impact,
             }
             for m in mistake_rows
         ]
@@ -471,6 +483,8 @@ def get_resume_report(
         return {
             "resume_id": resume_id,
             "overall_score": resume.overall_score,
+            "scoring_version": resume.scoring_version,
+            "weight_total": weight_total,
             "contact_info": json.loads(resume.contact_info or "{}"),
             "skills": json.loads(resume.skills or "[]"),
             "experience": json.loads(resume.experience or "[]"),

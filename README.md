@@ -71,7 +71,17 @@ Each resume is evaluated across 7 weighted buckets for a holistic assessment:
 | **Work Experience** | 10% | Internships, jobs with measurable outcomes | 100 |
 | **Soft Skills** | 5% | Communication, teamwork, leadership mentions | 100 |
 
-**Overall Score Calculation**: Weighted average based on the above percentages
+**Overall Score Calculation (Scoring Engine v2.0)**: The bucket weights above sum to 85%, not 100% — this is
+intentional (it preserves each bucket's relative importance, e.g. Formatting counts 2x Soft Skills), but the overall
+score is always **normalized** so a perfect resume reaches exactly 100:
+
+```
+overall_score = Σ(bucket_score × weight) / Σ(weight)
+```
+
+Every score is traceable: each deduction is recorded as a structured finding with a severity (critical/high/medium/
+low), the measured value, and what was expected (e.g. "Narrow margin: right (0.42in) — expected ≥ 0.5in"), returned
+alongside `scoring_version` and `weight_total` from `/resumes/{id}` and `/resumes/process/{id}`.
 
 ### Formatting & Styling Breakdown
 - **Page Count** (25 points): 1 page = full points, 2 pages = 15 points
@@ -391,9 +401,12 @@ POST /resumes/process/{upload_id}
 Response:
 {
   "resume_id": "uuid",
-  "overall_score": 85,
-  "buckets": [...],
-  "mistakes": [...]
+  "overall_score": 81.5,
+  "scoring_version": "2.0",
+  "weight_total": 0.85,
+  "buckets": [
+    {"name": "Formatting & Styling", "score": 95.0, "weight": 0.2, "weighted_score": 19.0}
+  ]
 }
 ```
 
@@ -427,10 +440,15 @@ GET /resumes/{resume_id}
 Response:
 {
   "resume_id": "uuid",
-  "overall_score": 85,
+  "overall_score": 81.5,
+  "scoring_version": "2.0",
+  "weight_total": 0.85,
   "buckets": [...],
-  "mistakes": [...],
-  "extracted_data": {...}
+  "mistakes": [
+    {"category": "Formatting & Styling", "mistake": "...", "feedback": "...",
+     "severity": "medium", "criterion": "margins", "value": "0.42in", "expected": ">= 0.5in"}
+  ],
+  "contact_info": {...}, "skills": [...], "experience": [...], "projects": [...], "education": [...]
 }
 ```
 
