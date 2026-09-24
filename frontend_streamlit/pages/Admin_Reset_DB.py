@@ -1,6 +1,11 @@
 import streamlit as st
 from utils.api import reset_db
+from utils.auth import require_login, require_role, render_session_sidebar
 from utils.ui import set_header
+
+require_login()
+render_session_sidebar()
+require_role("admin")
 
 set_header("⚠️ Admin – Reset Database", "Danger zone. This action cannot be undone.")
 

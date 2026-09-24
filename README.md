@@ -308,6 +308,71 @@ Network URL: http://192.168.x.x:8501
 
 ---
 
+## 🔐 Authentication
+
+Every API endpoint and every Streamlit page requires signing in. There are three roles:
+
+| Role | Can do |
+|---|---|
+| **Admin** | Everything, including bulk CSV upload, the `/debug/*` endpoints, and `/admin/reset-db` |
+| **Recruiter** | Upload/process/view/export any resume; bulk CSV upload |
+| **Student** | Upload/process/view/export **only their own** uploaded resumes; no bulk CSV upload, no admin/debug access |
+
+### Creating the first admin
+
+There's no public sign-up — the first admin is created from the command line, from the repo root, with your
+virtual environment active:
+
+```bash
+python -m backend.app.create_admin
+```
+
+You'll be prompted for an email, display name, and password (hidden input — never pass it as a CLI argument). This
+refuses to run again once an admin exists, unless you pass `--force`. Recruiter and Student accounts are created the
+same way today (there's no self-service sign-up yet) — insert a row into the `users` table with a
+`backend.app.auth.hash_password(...)` hash and the appropriate `role`, or extend `create_admin.py`'s pattern.
+
+### Local dev test accounts
+
+⚠️ **These are throwaway local-development credentials, not production accounts.** They exist only for trying the
+app out locally. Rotate or remove them (`DELETE FROM users WHERE email LIKE '%@resumegrader.local'`, or `python -m
+backend.app.create_admin --force` for a real admin) before deploying this anywhere reachable by anyone else.
+
+| Role | Email | Password |
+|---|---|---|
+| Admin | `admin@resumegrader.local` | `TempAdminPass123!` |
+| Recruiter | `recruiter@resumegrader.local` | `TempRecruiterPass123!` |
+| Student | `student@resumegrader.local` | `TempStudentPass123!` |
+
+### Logging in / out
+
+Open the Streamlit app — you'll see a login form before anything else. Enter your email and password. A "Logged in
+as ... / Log out" control appears in the sidebar once authenticated. Logging out clears your session immediately;
+logging back in requires the password again (sessions don't survive a page refresh, by design — see below).
+
+### How sessions work
+
+Authentication is a stateless JWT bearer token, issued by `POST /auth/login` and sent as
+`Authorization: Bearer <token>` on every subsequent request. There's no server-side session store, so logout is
+simply the client discarding the token — restarting the backend (or a page hard-refresh in Streamlit) invalidates
+all sessions immediately.
+
+### Required environment variable
+
+```text
+SESSION_SECRET=<a long random string>
+```
+
+Signs and verifies the JWTs. If unset, the backend generates a random one at startup for local-dev convenience and
+prints a warning — fine for quick local testing, but every restart invalidates all existing sessions, and it must be
+set explicitly (and kept out of version control) for anything longer-lived. There's no `.env` file loader built in;
+set it directly in your shell, e.g. `export SESSION_SECRET=...` (bash) or `$env:SESSION_SECRET=...` (PowerShell).
+
+An optional `RESUME_GRADER_DB_URL` env var overrides the SQLite connection string (used by the test suite to point
+at a throwaway database instead of the real one).
+
+---
+
 ## 📤 How to Use - Upload Methods
 
 ### Method 1: Direct PDF Upload
@@ -362,12 +427,48 @@ https://drive.google.com/file/d/1GHI345RST678/view
 
 ## 🔌 API Endpoints Reference
 
+Every endpoint below except `GET /health` and `POST /auth/login` requires `Authorization: Bearer <token>` (see
+[Authentication](#-authentication)). The **Auth** column shows which roles are allowed; Students are always
+additionally scoped to resumes tied to their own uploads.
+
+| Endpoint | Auth |
+|---|---|
+| `GET /health` | Public |
+| `POST /auth/login` | Public |
+| `GET /auth/me` | Any authenticated user |
+| `POST /resumes/upload` | Any authenticated user |
+| `POST /resumes/upload-csv` | Recruiter, Admin |
+| `POST /debug/parse-pdf`, `/debug/extract-fields` | Admin |
+| `POST /resumes/process/{upload_id}` | Any authenticated user (Students: own uploads only) |
+| `GET /resumes/{resume_id}` | Any authenticated user (Students: own uploads only) |
+| `GET /resumes` | Any authenticated user (Students: auto-filtered to own) |
+| `GET /export/csv`, `/export/excel`, `/export/json` | Any authenticated user (Students: auto-filtered to own) |
+| `POST /admin/reset-db` | Admin only |
+
 ### Core Endpoints
+
+#### Log In
+```http
+POST /auth/login
+Content-Type: application/x-www-form-urlencoded
+
+username=you@example.com&password=yourpassword
+
+Response:
+{
+  "access_token": "eyJ...",
+  "token_type": "bearer",
+  "role": "recruiter",
+  "name": "...",
+  "email": "you@example.com"
+}
+```
 
 #### Upload PDF Files
 ```http
 POST /resumes/upload
 Content-Type: multipart/form-data
+Authorization: Bearer <token>
 
 files: [PDF files]
 

@@ -1,9 +1,13 @@
 # backend/app/db.py
+import os
+
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # Using SQLite for local dev. Path: C:\resume-grader\resume_grader.db
-SQLITE_URL = "sqlite:///./resume_grader.db"
+# Overridable so tests (and any other environment) can point at a throwaway database
+# instead of the real one.
+SQLITE_URL = os.environ.get("RESUME_GRADER_DB_URL", "sqlite:///./resume_grader.db")
 
 engine = create_engine(
     SQLITE_URL, connect_args={"check_same_thread": False}
@@ -30,6 +34,13 @@ _V2_COLUMNS = {
         ("value", "VARCHAR"),
         ("expected", "VARCHAR"),
         ("impact", "INTEGER"),
+    ],
+    # V3 auth: `users` already existed (unused, created by an old create_db.py run) with the
+    # original 5-column schema -- these are the columns V3 adds.
+    "users": [
+        ("role", "VARCHAR"),
+        ("is_active", "BOOLEAN"),
+        ("updated_at", "DATETIME"),
     ],
 }
 

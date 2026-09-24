@@ -1,9 +1,10 @@
 # backend/app/main.py
 from sqlalchemy.orm import joinedload
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Path as FastAPIPath
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Path as FastAPIPath, Depends
 from fastapi.responses import JSONResponse
-from typing import List
+from fastapi.security import OAuth2PasswordRequestForm
+from typing import List, Optional
 from uuid import uuid4
 from pathlib import Path
 import shutil
@@ -25,6 +26,7 @@ from backend.app.db import SessionLocal
 from backend.app import models
 from backend.app.db import engine, ensure_columns
 from backend.app.models import Base
+from backend.app.auth import Role, get_current_user, require_role, create_access_token, verify_password
 
 from parser_engine.report_engine import generate_resume_report
 
@@ -45,6 +47,15 @@ class UploadResponse(BaseModel):
     upload_ids: List[str]
 
 
+def _scope_to_own_resumes(query, current_user: models.User):
+    """Students only ever see resumes tied to an upload they own. Recruiters/Admins see everything."""
+    if current_user.role == Role.STUDENT:
+        query = query.join(
+            models.ResumeUpload, models.Resume.upload_id == models.ResumeUpload.id
+        ).filter(models.ResumeUpload.user_id == current_user.id)
+    return query
+
+
 # ---------------------------------------------------
 # Health Check
 # ---------------------------------------------------
@@ -55,32 +66,87 @@ def health():
 
 
 # ---------------------------------------------------
+# Auth
+# ---------------------------------------------------
+
+@app.post("/auth/login")
+def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    db = SessionLocal()
+    try:
+        user = db.query(models.User).filter_by(email=form_data.username.strip().lower()).first()
+    finally:
+        db.close()
+
+    if not user or not user.is_active or not verify_password(form_data.password, user.password_hash):
+        # Same generic message either way -- don't reveal whether the account exists.
+        raise HTTPException(status_code=401, detail="Invalid username or password.")
+
+    token = create_access_token(user)
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "role": user.role,
+        "name": user.name,
+        "email": user.email,
+    }
+
+
+@app.get("/auth/me")
+def read_current_user(current_user: models.User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "email": current_user.email,
+        "name": current_user.name,
+        "role": current_user.role,
+    }
+
+
+# ---------------------------------------------------
 # Upload Resumes
 # ---------------------------------------------------
 
 @app.post("/resumes/upload", response_model=UploadResponse)
-async def upload_resumes(files: List[UploadFile] = File(...)):
+async def upload_resumes(
+    files: List[UploadFile] = File(...),
+    current_user: models.User = Depends(get_current_user),
+):
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
 
     upload_ids = []
 
-    for f in files:
-        if not f.filename.lower().endswith(".pdf"):
-            continue
+    db = SessionLocal()
+    try:
+        for f in files:
+            if not f.filename.lower().endswith(".pdf"):
+                continue
 
-        uid = str(uuid4())
-        dest = UPLOAD_DIR / f"{uid}.pdf"
+            uid = str(uuid4())
+            dest = UPLOAD_DIR / f"{uid}.pdf"
 
-        with dest.open("wb") as out_file:
-            shutil.copyfileobj(f.file, out_file)
+            with dest.open("wb") as out_file:
+                shutil.copyfileobj(f.file, out_file)
 
-        upload_ids.append(uid)
+            # Create the ResumeUpload row immediately (previously only created at process
+            # time) so ownership can be tagged right away for Student-scoped access.
+            db.add(models.ResumeUpload(
+                id=uid,
+                user_id=current_user.id,
+                file_name=f.filename,
+                file_path=str(dest),
+                status="uploaded",
+            ))
 
-        try:
-            await f.close()
-        except:
-            pass
+            upload_ids.append(uid)
+
+            try:
+                await f.close()
+            except:
+                pass
+
+        db.commit()
+    finally:
+        db.close()
 
     return {"upload_ids": upload_ids}
 
@@ -90,7 +156,10 @@ async def upload_resumes(files: List[UploadFile] = File(...)):
 # ---------------------------------------------------
 
 @app.post("/resumes/upload-csv")
-async def upload_csv_with_gdrive_links(file: UploadFile = File(...)):
+async def upload_csv_with_gdrive_links(
+    file: UploadFile = File(...),
+    current_user: models.User = Depends(require_role(Role.ADMIN, Role.RECRUITER)),
+):
     """
     Upload CSV file containing Google Drive links to resumes.
     
@@ -164,7 +233,20 @@ async def upload_csv_with_gdrive_links(file: UploadFile = File(...)):
             # Save PDF to uploads folder
             dest = UPLOAD_DIR / f"{uid}.pdf"
             dest.write_bytes(pdf_content)
-            
+
+            db = SessionLocal()
+            try:
+                db.add(models.ResumeUpload(
+                    id=uid,
+                    user_id=current_user.id,
+                    file_name=f"{uid}.pdf",
+                    file_path=str(dest),
+                    status="uploaded",
+                ))
+                db.commit()
+            finally:
+                db.close()
+
             upload_ids.append(uid)
             
             results.append({
@@ -212,7 +294,10 @@ async def upload_csv_with_gdrive_links(file: UploadFile = File(...)):
 # ---------------------------------------------------
 
 @app.post("/debug/parse-pdf")
-async def debug_parse_pdf(upload_id: str = Body(..., embed=True)):
+async def debug_parse_pdf(
+    upload_id: str = Body(..., embed=True),
+    current_user: models.User = Depends(require_role(Role.ADMIN)),
+):
     pdf_path = UPLOAD_DIR / f"{upload_id}.pdf"
     if not pdf_path.exists():
         raise HTTPException(404, "upload_id not found")
@@ -232,7 +317,10 @@ async def debug_parse_pdf(upload_id: str = Body(..., embed=True)):
 # ---------------------------------------------------
 
 @app.post("/debug/extract-fields")
-async def debug_extract_fields(upload_id: str = Body(..., embed=True)):
+async def debug_extract_fields(
+    upload_id: str = Body(..., embed=True),
+    current_user: models.User = Depends(require_role(Role.ADMIN)),
+):
     pdf_path = UPLOAD_DIR / f"{upload_id}.pdf"
     if not pdf_path.exists():
         raise HTTPException(404, "upload_id not found")
@@ -266,10 +354,22 @@ async def debug_extract_fields(upload_id: str = Body(..., embed=True)):
 # ---------------------------------------------------
 
 @app.post("/resumes/process/{upload_id}")
-async def process_resume(upload_id: str = FastAPIPath(...)):
+async def process_resume(
+    upload_id: str = FastAPIPath(...),
+    current_user: models.User = Depends(get_current_user),
+):
     pdf_path = UPLOAD_DIR / f"{upload_id}.pdf"
     if not pdf_path.exists():
         raise HTTPException(404, "upload_id not found")
+
+    if current_user.role == Role.STUDENT:
+        db = SessionLocal()
+        try:
+            upload_row = db.query(models.ResumeUpload).filter_by(id=upload_id).first()
+        finally:
+            db.close()
+        if not upload_row or upload_row.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="You do not have permission to perform this action.")
 
     # Parse
     raw_text, diagnostics = parse_pdf_to_text(pdf_path)
@@ -306,6 +406,7 @@ async def process_resume(upload_id: str = FastAPIPath(...)):
         if not upload_row:
             upload_row = models.ResumeUpload(
                 id=upload_id,
+                user_id=current_user.id,
                 file_name=f"{upload_id}.pdf",
                 file_path=str(pdf_path),
                 status="parsed"
@@ -409,7 +510,8 @@ async def process_resume(upload_id: str = FastAPIPath(...)):
 # ---------------------------------------------------
 @app.get("/resumes/{resume_id}")
 def get_resume_report(
-    resume_id: str = FastAPIPath(..., description="UUID of resume")
+    resume_id: str = FastAPIPath(..., description="UUID of resume"),
+    current_user: models.User = Depends(get_current_user),
 ):
     db = SessionLocal()
 
@@ -425,6 +527,11 @@ def get_resume_report(
 
         if not resume:
             raise HTTPException(status_code=404, detail="Resume not found")
+
+        if current_user.role == Role.STUDENT:
+            upload_row = db.query(models.ResumeUpload).filter_by(id=resume.upload_id).first()
+            if not upload_row or upload_row.user_id != current_user.id:
+                raise HTTPException(status_code=403, detail="You do not have permission to perform this action.")
 
         # ----------------------------
         # Fetch buckets
@@ -518,12 +625,14 @@ def list_resumes(
     missing_linkedin: bool = False,
     missing_github: bool = False,
     no_projects: bool = False,
-    sort_by: str = "score_desc"  # options: score_desc, score_asc, latest, oldest
+    sort_by: str = "score_desc",  # options: score_desc, score_asc, latest, oldest
+    current_user: models.User = Depends(get_current_user),
 ):
     db = SessionLocal()
 
     try:
         q = db.query(models.Resume)
+        q = _scope_to_own_resumes(q, current_user)
 
         # Score filtering
         q = q.filter(models.Resume.overall_score >= min_score)
@@ -578,10 +687,10 @@ def list_resumes(
         db.close()
 
 @app.get("/export/json")
-def export_json():
+def export_json(current_user: models.User = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        resumes = db.query(models.Resume).all()
+        resumes = _scope_to_own_resumes(db.query(models.Resume), current_user).all()
         rows = build_resume_export_rows(resumes)
         return rows
     finally:
@@ -589,10 +698,10 @@ def export_json():
 
 
 @app.get("/export/csv")
-def export_csv():
+def export_csv(current_user: models.User = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        resumes = db.query(models.Resume).all()
+        resumes = _scope_to_own_resumes(db.query(models.Resume), current_user).all()
         rows = build_resume_export_rows(resumes)
 
         if not rows:
@@ -615,10 +724,10 @@ def export_csv():
         db.close()
 
 @app.get("/export/excel")
-def export_excel():
+def export_excel(current_user: models.User = Depends(get_current_user)):
     db = SessionLocal()
     try:
-        resumes = db.query(models.Resume).all()
+        resumes = _scope_to_own_resumes(db.query(models.Resume), current_user).all()
         rows = build_resume_export_rows(resumes)
 
         if not rows:
@@ -652,13 +761,12 @@ def export_excel():
     finally:
         db.close()
 @app.post("/admin/reset-db")
-def reset_database():
+def reset_database(current_user: models.User = Depends(require_role(Role.ADMIN))):
     """
     Safe DB reset for SQLite on Windows:
     Drops and recreates all tables AND cleans upload directory.
     """
     from backend.app.db import engine, SessionLocal
-    from backend.app.models import Base
 
     try:
         # Close all active DB sessions
@@ -668,10 +776,19 @@ def reset_database():
         # Dispose engine connections
         engine.dispose()
 
-        # Drop and recreate tables
-        Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
-        
+        # Drop and recreate resume-data tables only. `users` is deliberately excluded --
+        # this reset was wiping every user account (including the admin calling it) before
+        # authentication existed to protect it; user accounts are a separate concern from
+        # resume data.
+        resume_data_tables = [
+            models.ResumeMistake.__table__,
+            models.ResumeBucket.__table__,
+            models.Resume.__table__,
+            models.ResumeUpload.__table__,
+        ]
+        Base.metadata.drop_all(bind=engine, tables=resume_data_tables)
+        Base.metadata.create_all(bind=engine, tables=resume_data_tables)
+
         # Clean upload directory - remove all uploaded PDF files
         files_deleted = 0
         if UPLOAD_DIR.exists():

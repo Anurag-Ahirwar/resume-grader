@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from utils.api import get_resume_detail
+from utils.auth import require_login, render_session_sidebar
 from utils.ui import set_header, get_score_color
 
 try:
@@ -9,6 +10,9 @@ try:
     PLOTLY_AVAILABLE = True
 except ImportError:
     PLOTLY_AVAILABLE = False
+
+require_login()
+render_session_sidebar()
 
 # Header
 set_header(

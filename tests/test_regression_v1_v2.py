@@ -23,13 +23,25 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _load_v1_scoring_engine():
-    source = subprocess.run(
-        ["git", "show", "HEAD:parser_engine/scoring_engine.py"],
+    # The file is gone from HEAD once its logic has moved into parser_engine/scoring/. `git log`
+    # still lists the deleting commit itself as having "touched" the path, so walk commits
+    # (newest first) and use the first one whose tree still actually contains the file.
+    commits = subprocess.run(
+        ["git", "log", "--all", "--format=%H", "--", "parser_engine/scoring_engine.py"],
         cwd=REPO_ROOT, capture_output=True, text=True, check=True,
-    ).stdout
-    module = types.ModuleType("_v1_scoring_engine_baseline")
-    exec(compile(source, "scoring_engine.py (V1, from git history)", "exec"), module.__dict__)
-    return module
+    ).stdout.split()
+
+    for commit in commits:
+        result = subprocess.run(
+            ["git", "show", f"{commit}:parser_engine/scoring_engine.py"],
+            cwd=REPO_ROOT, capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            module = types.ModuleType("_v1_scoring_engine_baseline")
+            exec(compile(result.stdout, f"scoring_engine.py (V1, from {commit[:8]})", "exec"), module.__dict__)
+            return module
+
+    pytest.skip("parser_engine/scoring_engine.py (V1 baseline) not found anywhere in git history")
 
 
 V1_WEIGHTS = [

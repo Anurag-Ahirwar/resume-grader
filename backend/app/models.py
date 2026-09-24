@@ -1,5 +1,5 @@
 # backend/app/models.py
-from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Text, Float
+from sqlalchemy import Column, String, Integer, DateTime, ForeignKey, Text, Float, Boolean
 from sqlalchemy.dialects.sqlite import JSON as SQLITE_JSON
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
@@ -16,7 +16,10 @@ class User(Base):
     name = Column(String)
     email = Column(String, unique=True)
     password_hash = Column(String)
+    role = Column(String, default="recruiter")  # "admin" | "recruiter" | "student" -- see backend/app/auth.py
+    is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 class ResumeUpload(Base):
     __tablename__ = "resume_uploads"
@@ -46,6 +49,12 @@ class Resume(Base):
     score_timestamp = Column(DateTime(timezone=True), nullable=True)
     scoring_config_version = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Without these, `resume.buckets` / `resume.mistakes` raise AttributeError, which
+    # build_resume_export_rows() was silently swallowing via a bare `except:` -- exports
+    # always had empty bucket columns as a result. See CLAUDE.md proactive-fix rules.
+    buckets = relationship("ResumeBucket", backref="resume", cascade="all, delete-orphan")
+    mistakes = relationship("ResumeMistake", backref="resume", cascade="all, delete-orphan")
 
 class ResumeBucket(Base):
     __tablename__ = "resume_buckets"

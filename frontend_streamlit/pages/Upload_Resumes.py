@@ -1,10 +1,14 @@
 import streamlit as st
-from utils.api import upload_pdfs, process_resume
+from utils.api import upload_pdfs, upload_csv, process_resume
+from utils.auth import require_login, require_role, render_session_sidebar, current_role
 from utils.ui import set_header
 import time
 import pandas as pd
 import io
 import requests
+
+require_login()
+render_session_sidebar()
 
 set_header("📤 Upload Resumes", "Upload PDFs directly or via CSV with Google Drive links")
 
@@ -79,13 +83,17 @@ with tab1:
 # TAB 2: CSV Upload with Google Drive Links
 # ===================================================================
 with tab2:
+    if current_role() == "student":
+        st.warning("🚫 Bulk CSV upload is available to Recruiters and Admins only.")
+        st.stop()
+
     st.info("""
     **Upload CSV file containing Google Drive links to resumes**
     - CSV must have a column named `resume_link`
     - Links must be publicly accessible (Anyone with link can view)
     - Maximum 200 resumes per CSV file
     """)
-    
+
     # CSV Template Download
     st.markdown("### 📥 Download CSV Template")
     st.caption("Use this template to create your CSV file")
@@ -158,13 +166,8 @@ with tab2:
                     
                     # Upload CSV to backend
                     try:
-                        response = requests.post(
-                            "http://127.0.0.1:8000/resumes/upload-csv",
-                            files={"file": ("resumes.csv", csv_file.getvalue(), "text/csv")}
-                        )
-                        response.raise_for_status()
-                        result = response.json()
-                        
+                        result = upload_csv(csv_file.getvalue())
+
                         progress_bar.progress(0.5)
                         
                         # Display results

@@ -1,4 +1,5 @@
 import streamlit as st
+from utils.auth import require_login, render_session_sidebar, current_role
 from utils.ui import apply_custom_css
 
 st.set_page_config(
@@ -9,6 +10,9 @@ st.set_page_config(
 )
 
 apply_custom_css()
+
+require_login()
+render_session_sidebar()
 
 # Main Title
 st.markdown("""
@@ -82,23 +86,26 @@ st.markdown("""
 4. **View results** in "📄 Resume List" and click on any resume for detailed insights
 """)
 
-# Sidebar info
+# Sidebar info -- role-aware: everyone can navigate to every page file (Streamlit doesn't
+# support hiding pages from the sidebar per-role without a paid/newer API), but each page
+# enforces its own access, and this description only lists what the current role can use.
 with st.sidebar:
     st.markdown("### 📖 Navigation")
-    st.markdown("""
-    - **📤 Upload Resumes**  
-      Upload and process PDF resumes
-    
-    - **📄 Resume List**  
-      Browse all processed resumes
-    
-    - **📊 Resume Detail**  
-      View detailed analysis
-    
-    - **⚙️ Admin**  
-      Database management
-    """)
-    
+    role = current_role()
+
+    nav_items = [
+        ("📤 Upload Resumes", "Upload and process PDF resumes"),
+        ("📄 Resume List", "Browse resumes you have access to"),
+        ("📊 Resume Detail", "View detailed analysis"),
+    ]
+    if role == "admin":
+        nav_items.append(("⚙️ Admin", "Database management (Admin only)"))
+
+    st.markdown("\n\n".join(f"- **{title}**  \n  {desc}" for title, desc in nav_items))
+
+    if role == "student":
+        st.caption("As a Student, you can only see resumes you've uploaded yourself.")
+
     st.divider()
     st.markdown("### 💡 Tips")
     st.info("💡 **Tip:** Use filters in Resume List to quickly find resumes that need attention (e.g., missing LinkedIn or GitHub)")
